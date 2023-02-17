@@ -1,0 +1,5 @@
+test.db
+cmd/devserver
+tmp/
+.DS_Store
+.env
