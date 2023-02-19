@@ -106,6 +106,10 @@ func Of(opts ...Opt) *Spec {
 		}
 	}
 
+	if s.Op == nil {
+		s.Op = &openapi3.Operation{}
+	}
+
 	return s
 }
 
@@ -170,14 +174,14 @@ func (s *Spec) Build(ref *openapi3.Reflector) error {
 		})
 	}
 
-	op.
+	s.Op.
 		WithParameters(params...).
 		WithTags(s.Tags...).
 		WithSummary(s.Summary).
 		WithDescription(s.Description)
 
 	if s.Auth {
-		op.WithSecurity(
+		s.Op.WithSecurity(
 			append(op.Security, map[string][]string{
 				"bearer": {},
 			})...,
@@ -185,7 +189,7 @@ func (s *Spec) Build(ref *openapi3.Reflector) error {
 	}
 
 	if s.AuthAPI {
-		op.WithSecurity(
+		s.Op.WithSecurity(
 			append(op.Security, map[string][]string{
 				"apikey": {},
 			})...,
@@ -193,18 +197,18 @@ func (s *Spec) Build(ref *openapi3.Reflector) error {
 	}
 
 	for _, response := range s.Responses {
-		if err := ref.SetJSONResponse(&op, response.Body, response.Code); err != nil {
+		if err := ref.SetJSONResponse(s.Op, response.Body, response.Code); err != nil {
 			return errors.Wrap(err, "oas: when setting response")
 		}
 	}
 
 	if s.Method == http.MethodPost || s.Method == http.MethodPut || s.Method == http.MethodPatch {
-		if err := ref.SetRequest(&op, s.Body, string(s.Method)); err != nil {
+		if err := ref.SetRequest(s.Op, s.Body, string(s.Method)); err != nil {
 			return errors.Wrap(err, "oas: when setting request")
 		}
 	}
 
-	if err := ref.Spec.AddOperation(string(s.Method), s.FullPath(), op); err != nil {
+	if err := ref.Spec.AddOperation(string(s.Method), s.FullPath(), *s.Op); err != nil {
 		return errors.Wrap(err, "oas: when adding op to spec")
 	}
 
