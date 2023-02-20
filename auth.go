@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"github.com/gofiber/fiber/v2"
 	"io/ioutil"
 	"net/http"
 	"net/url"
@@ -11,7 +12,6 @@ import (
 	"time"
 
 	"github.com/google/go-querystring/query"
-	"github.com/labstack/echo/v4"
 	"github.com/lestrrat-go/jwx/v2/jwk"
 	"github.com/lestrrat-go/jwx/v2/jwt"
 	"github.com/rs/zerolog/log"
@@ -57,24 +57,26 @@ func (s *Server) mountAuthEndpoints() *Server {
 		url.QueryEscape(s.oidc.RedirectURI),
 	)
 
-	s.e.GET("/api/auth", func(c echo.Context) error {
-		return c.Redirect(http.StatusTemporaryRedirect, authURL)
+	s.f.Get("/api/auth", func(c *fiber.Ctx) error {
+		return c.Redirect(authURL, http.StatusTemporaryRedirect)
 	})
 
-	s.e.Any("/api/auth/code", func(c echo.Context) error {
+	s.f.All("/api/auth/code", func(c *fiber.Ctx) error {
 		form := url.Values{}
 
 		form.Add("grant_type", "authorization_code")
 		form.Add("client_id", s.oidc.ClientID)
 		form.Add("client_secret", s.oidc.Secret)
-		form.Add("code", c.QueryParam("code"))
+		form.Add("code", c.Query("code"))
 		form.Add("redirect_uri", s.oidc.RedirectURI)
 
-		req, err := http.NewRequest(http.MethodPost, fmt.Sprintf("%s/%s", s.oidc.Issuer, s.oidc.TokenURI), strings.NewReader(form.Encode()))
+		req, err := http.
+			NewRequest(
+				http.MethodPost, fmt.Sprintf("%s/%s", s.oidc.Issuer, s.oidc.TokenURI), strings.NewReader(form.Encode()))
 		if err != nil {
 			log.Err(fmt.Errorf("create http client %w", err)).Send()
 
-			return c.JSON(http.StatusBadRequest, nil)
+			return c.Status(http.StatusBadRequest).JSON(nil)
 		}
 
 		req.Header.Add("Content-Type", "application/x-www-form-urlencoded")
@@ -83,37 +85,42 @@ func (s *Server) mountAuthEndpoints() *Server {
 		if err != nil {
 			log.Err(fmt.Errorf("send code req %w", err)).Send()
 
-			return c.JSON(http.StatusBadRequest, nil)
+			return c.Status(http.StatusBadRequest).JSON(nil)
 		}
 
 		bts, err := ioutil.ReadAll(res.Body)
 		if err != nil {
 			log.Err(fmt.Errorf("read body %w", err)).Send()
 
-			return c.JSON(http.StatusBadRequest, nil)
+			return c.Status(http.StatusBadRequest).JSON(nil)
 		}
 
 		var data CodeResponse
 
-		json.Unmarshal(bts, &data)
+		err = json.Unmarshal(bts, &data)
+		if err != nil {
+			log.Err(fmt.Errorf("unmarshal %w", err)).Send()
+
+			return c.Status(http.StatusBadRequest).JSON(nil)
+		}
 
 		v, err := query.Values(data)
 		if err != nil {
 			log.Err(fmt.Errorf("encode %w", err)).Send()
 
-			return c.JSON(http.StatusBadRequest, nil)
+			return c.Status(http.StatusBadRequest).JSON(nil)
 		}
 
-		return c.Redirect(http.StatusTemporaryRedirect, fmt.Sprintf("%s?%s", s.oidc.ClientRedirectURI, v.Encode()))
+		return c.Redirect(fmt.Sprintf("%s?%s", s.oidc.ClientRedirectURI, v.Encode()), http.StatusTemporaryRedirect)
 	})
 
-	s.e.Any("/api/auth/userinfo", func(c echo.Context) error {
-		claims, err := s.ValidateJWTToken(c.Request().Context(), c.QueryParam("accessToken"))
+	s.f.All("/api/auth/userinfo", func(c *fiber.Ctx) error {
+		claims, err := s.ValidateJWTToken(c.UserContext(), c.Query("accessToken"))
 		if err != nil {
-			return c.JSON(http.StatusUnauthorized, nil)
+			return c.Status(http.StatusUnauthorized).JSON(nil)
 		}
 
-		return c.JSON(200, claims)
+		return c.JSON(claims)
 	})
 
 	return s

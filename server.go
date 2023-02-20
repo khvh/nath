@@ -2,25 +2,36 @@ package nath
 
 import (
 	"embed"
+	"encoding/json"
 	"fmt"
-	gonanoid "github.com/matoous/go-nanoid/v2"
+	"github.com/ansrivas/fiberprometheus/v2"
+	"github.com/go-playground/validator/v10"
+	"github.com/gofiber/adaptor/v2"
+	"github.com/gofiber/fiber/v2"
+	"github.com/gofiber/fiber/v2/middleware/cors"
+	"github.com/gofiber/fiber/v2/middleware/filesystem"
+	"github.com/gofiber/fiber/v2/middleware/monitor"
+	"github.com/gofiber/fiber/v2/middleware/proxy"
+	"github.com/gofiber/fiber/v2/middleware/recover"
+	"github.com/gofiber/fiber/v2/middleware/requestid"
+	"github.com/matoous/go-nanoid/v2"
 	"io/fs"
 	"net"
 	"net/http"
 	"os"
+	"os/exec"
+	"strconv"
 	"strings"
 
+	"github.com/gofiber/contrib/otelfiber"
 	"github.com/imdario/mergo"
 	"github.com/khvh/nath/queue"
 	"github.com/khvh/nath/spec"
 	"github.com/khvh/nath/telemetry"
-	"github.com/labstack/echo-contrib/prometheus"
 	"github.com/labstack/echo/v4"
-	"github.com/labstack/echo/v4/middleware"
 	"github.com/lestrrat-go/jwx/v2/jwk"
 	"github.com/rs/zerolog/log"
 	"github.com/swaggest/openapi-go/openapi3"
-	"go.opentelemetry.io/contrib/instrumentation/github.com/labstack/echo/otelecho"
 	"go.opentelemetry.io/otel"
 )
 
@@ -49,12 +60,13 @@ type OIDCOptions struct {
 
 // Server ...
 type Server struct {
-	e      *echo.Echo
-	routes []*Route
-	ref    *openapi3.Reflector
-	opts   *ServerOptions
-	oidc   *OIDCOptions
-	jwks   jwk.Set
+	f         *fiber.App
+	routes    []*Route
+	ref       *openapi3.Reflector
+	opts      *ServerOptions
+	oidc      *OIDCOptions
+	jwks      jwk.Set
+	validator *validator.Validate
 }
 
 // Configuration ...
@@ -63,7 +75,8 @@ type Configuration func(s *Server) error
 // New constructs Server
 func New(cfgs ...Configuration) *Server {
 	s := &Server{
-		routes: []*Route{},
+		routes:    []*Route{},
+		validator: validator.New(),
 	}
 
 	for _, cfg := range cfgs {
@@ -74,56 +87,66 @@ func New(cfgs ...Configuration) *Server {
 		}
 	}
 
-	if s.e == nil {
-		s.e = createEcho(s.opts.HideBanner)
+	if s.f == nil {
+		s.f = createFiber(s.opts.HideBanner)
 	}
 
-	s.ref = spec.CreateReflector(&spec.ReflectorOptions{
-		Servers:                 addresses(),
-		Port:                    s.opts.Port,
-		Title:                   s.opts.ID + "-api",
-		Description:             s.opts.Description,
-		Version:                 s.opts.Version,
-		OpenAPIAuthorizationURL: fmt.Sprintf("%s/%s", s.oidc.Issuer, s.oidc.AuthURI),
-		APIKeyAuth:              false,
-	})
+	refOpts := &spec.ReflectorOptions{
+		Servers:     addresses(),
+		Port:        s.opts.Port,
+		Title:       s.opts.ID + "-api",
+		Description: s.opts.Description,
+		Version:     s.opts.Version,
+		APIKeyAuth:  false,
+	}
+
+	if s.oidc != nil {
+		refOpts.OpenAPIAuthorizationURL = fmt.Sprintf("%s/%s", s.oidc.Issuer, s.oidc.AuthURI)
+	}
+
+	s.ref = spec.CreateReflector(refOpts)
 
 	return s
 }
 
 // Route ...
 func (s *Server) Route(routes ...*Route) *Server {
+
 	for _, rt := range routes {
 		if rt.spec.Auth {
-			rt.middleware = append(rt.middleware, func(next echo.HandlerFunc) echo.HandlerFunc {
-				return func(c echo.Context) error {
-					claims, err := s.ValidateJWTToken(c.Request().Context(), strings.ReplaceAll(c.Request().Header.Get("authorization"), "Bearer ", ""))
+			rt.handler = append([]fiber.Handler{
+				func(c *fiber.Ctx) error {
+					claims, err := s.
+						ValidateJWTToken(c.UserContext(), strings.ReplaceAll(c.Get("authorization"), "Bearer ", ""))
 					if err != nil {
-						log.Err(err).Send()
-						return c.JSON(http.StatusUnauthorized, nil)
+						return c.Status(http.StatusUnauthorized).JSON(fiber.Map{})
 					}
 
-					c.Set("claims", claims)
+					c.Locals("claims", claims)
 
-					return next(c)
-				}
-			})
+					return c.Next()
+				},
+			}, rt.handler...)
+		}
+
+		err := rt.spec.Build(s.ref)
+		if err != nil {
+			log.Err(err).Send()
 		}
 
 		switch rt.spec.Method {
 		case spec.MethodGet:
-			s.e.GET(rt.spec.FullRouterPath(), rt.handler, rt.middleware...)
+			s.f.Get(rt.spec.FullRouterPath(), rt.handler...)
 		case spec.MethodDelete:
-			s.e.DELETE(rt.spec.FullRouterPath(), rt.handler, rt.middleware...)
+			s.f.Delete(rt.spec.FullRouterPath(), rt.handler...)
 		case spec.MethodPost:
-			s.e.POST(rt.spec.FullRouterPath(), rt.handler, rt.middleware...)
+			fmt.Println(len(rt.handler))
+			s.f.Post(rt.spec.FullRouterPath(), rt.handler...)
 		case spec.MethodPut:
-			s.e.PUT(rt.spec.FullRouterPath(), rt.handler, rt.middleware...)
+			s.f.Put(rt.spec.FullRouterPath(), rt.handler...)
 		case spec.MethodPatch:
-			s.e.PATCH(rt.spec.FullRouterPath(), rt.handler, rt.middleware...)
+			s.f.Patch(rt.spec.FullRouterPath(), rt.handler...)
 		}
-
-		rt.spec.Build(s.ref)
 	}
 
 	return s
@@ -157,39 +180,14 @@ func WithOpts(opts ...ServerOptions) Configuration {
 // WithDefaultMiddleware ...
 func WithDefaultMiddleware() Configuration {
 	return func(s *Server) error {
-		if s.e == nil {
-			s.e = createEcho(s.opts.HideBanner)
+		if s.f == nil {
+			s.f = createFiber(s.opts.HideBanner)
 		}
 
-		s.e.Use(middleware.RequestID())
-		s.e.Use(middleware.CORS())
-		s.e.Use(middleware.Recover())
-
-		return nil
-	}
-}
-
-// WithRequestLogger ...
-func WithRequestLogger() Configuration {
-	return func(s *Server) error {
-		if s.e == nil {
-			s.e = createEcho(s.opts.HideBanner)
-		}
-
-		s.e.Use(middleware.RequestLoggerWithConfig(middleware.RequestLoggerConfig{
-			LogURI:    true,
-			LogStatus: true,
-			LogValuesFunc: func(c echo.Context, v middleware.RequestLoggerValues) error {
-				log.Trace().
-					Str("method", c.Request().Method).
-					Int("code", v.Status).
-					Str("uri", v.URI).
-					Str("from", c.Request().RemoteAddr).
-					Send()
-
-				return nil
-			},
-		}))
+		s.f.Use(requestid.New())
+		s.f.Use(recover.New())
+		s.f.Use(cors.New())
+		s.f.Get("/monitor", monitor.New(monitor.Config{Title: s.opts.ID}))
 
 		return nil
 	}
@@ -198,8 +196,8 @@ func WithRequestLogger() Configuration {
 // WithTracing ...
 func WithTracing(url ...string) Configuration {
 	return func(s *Server) error {
-		if s.e == nil {
-			s.e = createEcho(s.opts.HideBanner)
+		if s.f == nil {
+			s.f = createFiber(s.opts.HideBanner)
 		}
 
 		id := strings.ReplaceAll(s.opts.ID, "-", "_")
@@ -213,17 +211,87 @@ func WithTracing(url ...string) Configuration {
 
 		telemetry.New(id, u)
 
-		s.e.Use(otelecho.Middleware(id))
+		s.f.Use(otelfiber.Middleware(otelfiber.WithServerName(id)))
 
 		return nil
 	}
 }
 
+func (s *Server) startYarnDev(dir string) {
+	cmd := exec.Command("yarn", "dev")
+
+	cmd.Dir = dir
+
+	out, err := cmd.Output()
+
+	log.Trace().Err(err).Bytes("out", out).Send()
+}
+
+func (s *Server) buildYarn(dir string) {
+	cmd := exec.Command("yarn", "build")
+
+	cmd.Dir = dir
+
+	out, err := cmd.Output()
+
+	log.Trace().Err(err).Bytes("out", out).Send()
+}
+
+func (s *Server) mountFrontend(ui embed.FS, dir string) *Server {
+	s.buildYarn(dir)
+
+	s.f.Use("/*", filesystem.New(filesystem.Config{
+		Root:       http.FS(ui),
+		PathPrefix: "ui/dist",
+		Browse:     false,
+	}))
+
+	log.Trace().Msg("Frontend mounted")
+
+	return s
+}
+
 // WithFrontend ...
-func WithFrontend(data embed.FS) Configuration {
+func WithFrontend(data *embed.FS, dir string) Configuration {
 	return func(s *Server) error {
-		if s.e == nil {
-			s.e = createEcho(s.opts.HideBanner)
+		if s.f == nil {
+			s.f = createFiber(s.opts.HideBanner)
+		}
+
+		if data != nil {
+			s.mountFrontend(*data, dir)
+		} else {
+			go s.startYarnDev(dir)
+
+			log.Trace().Msg("Frontend dev server proxy started")
+
+			fePort := 3000
+
+			file, err := os.ReadFile(dir + "/package.json")
+			if err != nil {
+				log.Trace().Err(err).Send()
+			}
+
+			var packageJson map[string]interface{}
+
+			err = json.Unmarshal(file, &packageJson)
+			if err != nil {
+				log.Trace().Err(err).Send()
+			} else {
+				fePort = int(packageJson["devPort"].(float64))
+			}
+
+			s.f.Get("/*", func(c *fiber.Ctx) error {
+				err := proxy.
+					Do(c, strings.
+						ReplaceAll(c.Request().URI().String(), strconv.Itoa(s.opts.Port), strconv.Itoa(fePort)),
+					)
+				if err != nil {
+					log.Err(err).Send()
+				}
+
+				return c.Send(c.Response().Body())
+			})
 		}
 
 		return nil
@@ -233,15 +301,21 @@ func WithFrontend(data embed.FS) Configuration {
 // WithQueue ...
 func WithQueue(url, pw string, opts queue.Queues, fn func(q *queue.Queue)) Configuration {
 	return func(s *Server) error {
-		if s.e == nil {
-			s.e = createEcho(s.opts.HideBanner)
+		if s.f == nil {
+			s.f = createFiber(s.opts.HideBanner)
 		}
 
 		q, mon := queue.
 			CreateServer(url, 11, opts).
 			MountMonitor("127.0.0.1:6379", "")
 
-		s.e.Any("/monitoring/tasks/*", echo.WrapHandler(mon))
+		//s.e.Any("/monitoring/tasks/*", echo.WrapHandler(mon))
+
+		s.f.All("/monitoring/tasks/*", adaptor.HTTPHandler(mon))
+
+		fn(q)
+
+		q.Run()
 
 		fn(q)
 
@@ -256,11 +330,16 @@ func WithQueue(url, pw string, opts queue.Queues, fn func(q *queue.Queue)) Confi
 // WithMetrics ...
 func WithMetrics() Configuration {
 	return func(s *Server) error {
-		if s.e == nil {
-			s.e = createEcho(s.opts.HideBanner)
+		if s.f == nil {
+			s.f = createFiber(s.opts.HideBanner)
 		}
 
-		prometheus.NewPrometheus(strings.ReplaceAll(s.opts.ID, "-", "_"), nil).Use(s.e)
+		id := strings.ReplaceAll(s.opts.ID, "-", "_")
+		prometheus := fiberprometheus.New(id)
+
+		prometheus.RegisterAt(s.f, "/metrics")
+
+		s.f.Use(prometheus.Middleware)
 
 		return nil
 	}
@@ -269,8 +348,8 @@ func WithMetrics() Configuration {
 // WithOIDC enables OpenID Connect auth
 func WithOIDC(opts OIDCOptions) Configuration {
 	return func(s *Server) error {
-		if s.e == nil {
-			s.e = createEcho(s.opts.HideBanner)
+		if s.f == nil {
+			s.f = createFiber(s.opts.HideBanner)
 		}
 
 		s.oidc = &opts
@@ -291,13 +370,13 @@ func WithOIDC(opts OIDCOptions) Configuration {
 }
 
 // WithMiddleware add middleware to Echo
-func WithMiddleware(middleware ...echo.MiddlewareFunc) Configuration {
+func WithMiddleware(middleware ...fiber.Handler) Configuration {
 	return func(s *Server) error {
-		if s.e == nil {
-			s.e = createEcho(s.opts.HideBanner)
+		if s.f == nil {
+			s.f = createFiber(s.opts.HideBanner)
 		}
 
-		s.e.Use(middleware...)
+		s.f.Use(middleware)
 
 		return nil
 	}
@@ -311,12 +390,16 @@ func (s *Server) build() *Server {
 		return s
 	}
 
-	s.e.GET("/spec/spec.yaml", func(c echo.Context) error {
-		return c.Blob(200, "application/openapi+yaml", yamlBytes)
+	s.f.Get("/spec/spec.yaml", func(c *fiber.Ctx) error {
+		c.Set("content-type", "application/openapi+yaml")
+
+		return c.Send(yamlBytes)
 	})
 
-	s.e.GET("/spec/spec.yml", func(c echo.Context) error {
-		return c.Blob(200, "application/openapi+yaml", yamlBytes)
+	s.f.Get("/spec/spec.yml", func(c *fiber.Ctx) error {
+		c.Set("content-type", "application/openapi+yaml")
+
+		return c.Send(yamlBytes)
 	})
 
 	jsonBytes, err := s.ref.Spec.MarshalJSON()
@@ -326,8 +409,10 @@ func (s *Server) build() *Server {
 		return s
 	}
 
-	s.e.GET("/spec/spec.json", func(c echo.Context) error {
-		return c.Blob(200, "application/openapi+json", jsonBytes)
+	s.f.Get("/spec/spec.json", func(c *fiber.Ctx) error {
+		c.Set("content-type", "application/openapi+json")
+
+		return c.Send(jsonBytes)
 	})
 
 	return s
@@ -349,14 +434,14 @@ var content embed.FS
 func (s *Server) Run() {
 	s.build()
 
-	fsContent := getFileSystem(content)
-	assetHandler := http.FileServer(fsContent)
+	s.f.Use("/docs", filesystem.New(filesystem.Config{
+		Root:       http.FS(content),
+		PathPrefix: "/docs",
+		Browse:     false,
+	}))
 
-	s.e.Any("/docs", echo.WrapHandler(http.StripPrefix("/docs", assetHandler)))
-	s.e.Any("/docs/*", echo.WrapHandler(http.StripPrefix("/docs", assetHandler)))
-
-	s.e.Any("/oauth-receiver.html*", func(c echo.Context) error {
-		return c.Redirect(http.StatusTemporaryRedirect, "/docs"+c.Request().RequestURI)
+	s.f.All("/oauth-receiver.html*", func(c *fiber.Ctx) error {
+		return c.Redirect("/docs"+string(c.Request().RequestURI()), http.StatusTemporaryRedirect)
 	})
 
 	for _, host := range addresses() {
@@ -370,7 +455,11 @@ func (s *Server) Run() {
 
 	log.Info().Str("server", s.opts.ID).Send()
 
-	log.Err(s.e.Start(fmt.Sprintf("%s:%d", s.opts.Host, s.opts.Port))).Send()
+	log.Err(s.f.Listen(fmt.Sprintf("%s:%d", s.opts.Host, s.opts.Port))).Send()
+}
+
+func createFiber(hideBanner bool) *fiber.App {
+	return fiber.New(fiber.Config{DisableStartupMessage: hideBanner})
 }
 
 func createEcho(hideBanner bool) *echo.Echo {
