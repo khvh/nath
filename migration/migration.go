@@ -4,9 +4,9 @@ import (
 	"database/sql"
 	"embed"
 
+	_ "github.com/glebarez/go-sqlite" // for sqlite
 	"github.com/jmoiron/sqlx"
-	_ "github.com/lib/pq"           // for postgres
-	_ "github.com/mattn/go-sqlite3" // for sqlite
+	_ "github.com/lib/pq" // for postgres
 	"github.com/pressly/goose/v3"
 	"github.com/rs/zerolog/log"
 )
