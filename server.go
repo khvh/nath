@@ -14,8 +14,10 @@ import (
 	"github.com/gofiber/fiber/v2/middleware/proxy"
 	"github.com/gofiber/fiber/v2/middleware/recover"
 	"github.com/gofiber/fiber/v2/middleware/requestid"
+	"github.com/google/uuid"
 	"github.com/matoous/go-nanoid/v2"
 	"io/fs"
+	"math/rand"
 	"net"
 	"net/http"
 	"os"
@@ -77,6 +79,15 @@ func New(cfgs ...Configuration) *Server {
 	s := &Server{
 		routes:    []*Route{},
 		validator: validator.New(),
+		opts: &ServerOptions{
+			ID:            uuid.NewString(),
+			Description:   "",
+			Version:       "1.0.0",
+			Host:          "0.0.0.0",
+			Port:          rand.Intn(1500),
+			HideBanner:    false,
+			RequestLogger: false,
+		},
 	}
 
 	for _, cfg := range cfgs {
