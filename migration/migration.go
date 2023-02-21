@@ -5,8 +5,7 @@ import (
 	"embed"
 
 	_ "github.com/glebarez/go-sqlite" // for sqlite
-	"github.com/jmoiron/sqlx"
-	_ "github.com/lib/pq" // for postgres
+	_ "github.com/lib/pq"             // for postgres
 	"github.com/pressly/goose/v3"
 	"github.com/rs/zerolog/log"
 )
@@ -22,13 +21,13 @@ const (
 
 // Init migrations
 func Init(migrations embed.FS, args []string, dbType string, dsn string) {
-	db, err := sqlx.Open(dbType, dsn)
+	db, err := sql.Open(dbType, dsn)
 	if err != nil {
 		log.Panic().Err(err).Send()
 	}
 
 	if len(args) > 0 {
-		migrate(args[0], dbType, migrations, db.DB)
+		migrate(args[0], dbType, migrations, db)
 	}
 }
 
