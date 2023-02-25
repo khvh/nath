@@ -3,7 +3,7 @@ package migration
 import (
   "database/sql"
   "embed"
-	
+
   "github.com/pressly/goose/v3"
   "github.com/rs/zerolog/log"
 )
