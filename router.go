@@ -2,12 +2,13 @@ package nath
 
 import (
 	"errors"
+	"net/http"
+
 	"github.com/go-playground/validator/v10"
 	"github.com/gofiber/fiber/v2"
 	"github.com/khvh/nath/spec"
 	"github.com/labstack/echo/v4"
 	"github.com/rs/zerolog/log"
-	"net/http"
 )
 
 // Route ...
@@ -103,6 +104,13 @@ func (r *Route) WithAPIAuth() *Route {
 // WithSpecOpts adds additional spec values to Spec
 func (r *Route) WithSpecOpts(s ...spec.Opt) *Route {
 	r.spec.With(s...)
+
+	return r
+}
+
+// WithQuery ...
+func (r *Route) WithQuery(obj any) *Route {
+	r.spec.WithQueryObject(obj)
 
 	return r
 }

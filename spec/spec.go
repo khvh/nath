@@ -127,6 +127,13 @@ func (s *Spec) WithAPIAuth() *Spec {
 	return s
 }
 
+// WithQueryObject ...
+func (s *Spec) WithQueryObject(obj any) *Spec {
+	s.Body = obj
+
+	return s
+}
+
 // With is a generic method to add/replace opts after Spec is already created
 func (s *Spec) With(opts ...Opt) *Spec {
 	for _, opt := range opts {
