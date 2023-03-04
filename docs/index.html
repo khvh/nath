@@ -7,12 +7,23 @@
     <!-- <script type="module" src="https://unpkg.com/rapidoc/dist/rapidoc-min.js"></script> -->
     <title>API</title>
     <script type="module" src="/docs/rapidoc.js"></script>
+    <script>
+      const setTheme = doc => {
+        doc.setAttribute('theme','light');
+        doc.setAttribute('bg-color','#ecf1f7');
+        doc.setAttribute('text-color','#133863');
+      }
+
+      document.addEventListener('DOMContentLoaded', () => setTheme(document.querySelector('#doc')));
+    </script>
   </head>
   <body>
     <rapi-doc
+      id="doc"
+      layout="column"
       spec-url="/spec/spec.json"
       schema-style="table"
-      show-header="true"
+      show-header="false"
       show-info="true"
       allow-authentication="true"
       allow-server-selection="true"
